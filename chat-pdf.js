@@ -501,8 +501,8 @@ function buildDocumentDefinition(session, transcript, safeText) {
   };
 }
 
-async function generateChatPdf(session, destination) {
-  const transcript = await extractConversation(session.source);
+async function generateChatPdf(session, destination, existingTranscript) {
+  const transcript = existingTranscript || await extractConversation(session.source);
   const { pdfmake, safeText } = configurePdfMake();
   const definition = buildDocumentDefinition(session, transcript, safeText);
   const tempDestination = `${destination}.tmp-${process.pid}-${Date.now()}`;

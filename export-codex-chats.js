@@ -10,7 +10,9 @@ const { promisify } = require("node:util");
 const os = require("node:os");
 const path = require("node:path");
 const readline = require("node:readline");
-const { generateChatPdf, isUsablePdf } = require("./chat-pdf");
+const { extractConversation, generateChatPdf, isUsablePdf } = require("./chat-pdf");
+const { generateChatMarkdown, isUsableMarkdown } = require("./chat-markdown");
+const { generateChatHtml, isUsableHtml } = require("./chat-html");
 
 const UUID_AT_END = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i;
 const WINDOWS_RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
@@ -20,7 +22,7 @@ function printHelp() {
   console.log(`Export Codex sessions into project/title folders.
 
 Usage:
-  export-codex-chats [options]
+  codex-chat-export [options]
 
 Options:
   --source <path>  Session directory (default: ~/.codex/sessions)
@@ -28,12 +30,16 @@ Options:
   --state <path>   Codex state database (default: ~/.codex/state_5.sqlite)
   --output <path>  Export directory (default: current working directory)
   --project <name> Export only this project (case-insensitive exact match)
+  --md             Also generate readable Markdown transcripts
+  --html           Also generate standalone HTML transcripts
   --pdf            Also generate readable PDF transcripts
   --dry-run        Show what would happen without writing files
   --help, -h       Show this help
 
 Output layout:
   <output>/<Project-Name>/<Session-Title>.jsonl
+  <output>/<Project-Name>/<Session-Title>.md   (with --md)
+  <output>/<Project-Name>/<Session-Title>.html (with --html)
   <output>/<Project-Name>/<Session-Title>.pdf  (with --pdf)
 `);
 }
@@ -47,6 +53,8 @@ function parseArgs(argv) {
     output: process.cwd(),
     project: undefined,
     pdf: false,
+    md: false,
+    html: false,
     dryRun: false,
     help: false,
   };
@@ -57,6 +65,10 @@ function parseArgs(argv) {
       options.dryRun = true;
     } else if (arg === "--pdf") {
       options.pdf = true;
+    } else if (arg === "--md") {
+      options.md = true;
+    } else if (arg === "--html") {
+      options.html = true;
     } else if (arg === "--help" || arg === "-h") {
       options.help = true;
     } else if (arg === "--source" || arg === "--index" || arg === "--state" || arg === "--output" || arg === "--project") {
@@ -359,6 +371,8 @@ function assignDestinations(sessions, outputRoot) {
     usedDestinations.add(destinationKey);
     session.destination = path.join(outputRoot, session.project, `${candidate}.jsonl`);
     session.pdfDestination = path.join(outputRoot, session.project, `${candidate}.pdf`);
+    session.markdownDestination = path.join(outputRoot, session.project, `${candidate}.md`);
+    session.htmlDestination = path.join(outputRoot, session.project, `${candidate}.html`);
     session.hadCollision = position.size > 1 || counter > 2;
   }
 
@@ -387,50 +401,193 @@ async function filesAreEqual(left, right) {
   }
 }
 
+async function findExportedJsonlFiles(outputRoot) {
+  let projectEntries;
+  try {
+    projectEntries = await fsp.readdir(outputRoot, { withFileTypes: true });
+  } catch (error) {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  }
+
+  const results = [];
+  projectEntries.sort((left, right) => left.name.localeCompare(right.name));
+  for (const projectEntry of projectEntries) {
+    if (!projectEntry.isDirectory()) continue;
+    const projectPath = path.join(outputRoot, projectEntry.name);
+    const files = await fsp.readdir(projectPath, { withFileTypes: true });
+    files.sort((left, right) => left.name.localeCompare(right.name));
+    for (const file of files) {
+      if (file.isFile() && file.name.endsWith(".jsonl")) {
+        results.push({
+          filePath: path.join(projectPath, file.name),
+          project: projectEntry.name,
+        });
+      }
+    }
+  }
+  return results;
+}
+
+function setTranscriptDestinations(session, jsonlPath) {
+  const stem = jsonlPath.slice(0, -".jsonl".length);
+  session.destination = jsonlPath;
+  session.markdownDestination = `${stem}.md`;
+  session.htmlDestination = `${stem}.html`;
+  session.pdfDestination = `${stem}.pdf`;
+  return session;
+}
+
+async function generatedFileIsCurrent(jsonlPath, generatedPath, validator) {
+  try {
+    const [jsonlStat, generatedStat] = await Promise.all([
+      fsp.stat(jsonlPath),
+      fsp.stat(generatedPath),
+    ]);
+    if (!jsonlStat.isFile() || !generatedStat.isFile()) return false;
+    if (generatedStat.mtimeMs < jsonlStat.mtimeMs) return false;
+    return validator(generatedPath);
+  } catch (error) {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function generateRequestedTranscripts(session, options, result) {
+  let transcriptPromise;
+  const loadTranscript = () => {
+    transcriptPromise ??= extractConversation(session.source);
+    return transcriptPromise;
+  };
+
+  if (options.md) {
+    if (await generatedFileIsCurrent(session.source, session.markdownDestination, isUsableMarkdown)) {
+      result.markdownUnchanged += 1;
+    } else {
+      try {
+        await generateChatMarkdown(session, session.markdownDestination, await loadTranscript());
+        result.markdownGenerated += 1;
+      } catch (error) {
+        result.markdownErrors.push({ source: session.source, message: error.message });
+      }
+    }
+  }
+
+  if (options.html) {
+    if (await generatedFileIsCurrent(session.source, session.htmlDestination, isUsableHtml)) {
+      result.htmlUnchanged += 1;
+    } else {
+      try {
+        await generateChatHtml(session, session.htmlDestination, await loadTranscript());
+        result.htmlGenerated += 1;
+      } catch (error) {
+        result.htmlErrors.push({ source: session.source, message: error.message });
+      }
+    }
+  }
+
+  if (options.pdf) {
+    if (await generatedFileIsCurrent(session.source, session.pdfDestination, isUsablePdf)) {
+      result.pdfsUnchanged += 1;
+    } else {
+      try {
+        await generateChatPdf(session, session.pdfDestination, await loadTranscript());
+        result.pdfsGenerated += 1;
+      } catch (error) {
+        result.pdfErrors.push({ source: session.source, message: error.message });
+      }
+    }
+  }
+}
+
 async function exportSessions(options) {
   const source = path.resolve(options.source);
   const output = path.resolve(options.output);
+  const formatRequested = Boolean(options.md || options.html || options.pdf);
+  const requestedProject = options.project?.toLocaleLowerCase();
 
   if (isSameOrInside(output, source)) {
     throw new Error("The output directory cannot be the session source or a folder inside it.");
   }
 
-  const sourceStat = await fsp.stat(source).catch((error) => {
-    if (error.code === "ENOENT") throw new Error(`Session directory does not exist: ${source}`);
-    throw error;
-  });
-  if (!sourceStat.isDirectory()) throw new Error(`Session source is not a directory: ${source}`);
+  const existingExports = await findExportedJsonlFiles(output);
+  const selectedExistingExports = requestedProject
+    ? existingExports.filter((entry) => entry.project.toLocaleLowerCase() === requestedProject)
+    : existingExports;
+
+  let sourceAvailable = true;
+  let sourceFiles = [];
+  try {
+    const sourceStat = await fsp.stat(source);
+    if (!sourceStat.isDirectory()) throw new Error(`Session source is not a directory: ${source}`);
+    sourceFiles = await findJsonlFiles(source);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    sourceAvailable = false;
+    if (!formatRequested || existingExports.length === 0) {
+      throw new Error(`Session directory does not exist: ${source}`);
+    }
+  }
 
   const statePath = options.state || path.join(path.dirname(options.index), "state_5.sqlite");
-  const [sourceFiles, titleIndex] = await Promise.all([
-    findJsonlFiles(source),
-    loadTitles(options.index, statePath),
-  ]);
+  const titleIndex = await loadTitles(options.index, statePath);
   const allSessions = await mapWithConcurrency(sourceFiles, 16, (file) => inspectSession(file, titleIndex));
-  const availableProjects = [...new Set(allSessions.map((session) => session.project))]
+  const availableProjects = [...new Set([
+    ...allSessions.map((session) => session.project),
+    ...existingExports.map((entry) => entry.project),
+  ])]
     .sort((left, right) => left.localeCompare(right));
-  const requestedProject = options.project?.toLocaleLowerCase();
   const sessions = requestedProject
     ? allSessions.filter((session) => session.project.toLocaleLowerCase() === requestedProject)
     : allSessions;
 
-  if (requestedProject && sessions.length === 0) {
+  if (
+    requestedProject &&
+    sessions.length === 0 &&
+    (!formatRequested || selectedExistingExports.length === 0)
+  ) {
     throw new Error(
       `Project "${options.project}" was not found. Available projects: ${availableProjects.join(", ") || "none"}`,
     );
   }
 
   assignDestinations(sessions, output);
+  const currentDestinations = new Set(sessions.map((session) => path.resolve(session.destination)));
+  const priorExportEntries = selectedExistingExports.filter(
+    (entry) => !currentDestinations.has(path.resolve(entry.filePath)),
+  );
+  const priorExportSessions = await mapWithConcurrency(priorExportEntries, 16, async (entry) => {
+    const inspected = await inspectSession(entry.filePath, titleIndex);
+    return setTranscriptDestinations({
+      ...inspected,
+      project: entry.project,
+      title: path.basename(entry.filePath, ".jsonl"),
+      source: entry.filePath,
+    }, entry.filePath);
+  });
+  const projectNames = new Set(sessions.map((session) => session.project));
+  if (formatRequested) {
+    for (const session of priorExportSessions) projectNames.add(session.project);
+  }
 
   const result = {
     found: sessions.length,
     scanned: allSessions.length,
+    sourceAvailable,
     copied: 0,
     unchanged: 0,
     pdfsGenerated: 0,
     pdfsUnchanged: 0,
     pdfErrors: [],
-    projects: new Set(sessions.map((session) => session.project)).size,
+    markdownGenerated: 0,
+    markdownUnchanged: 0,
+    markdownErrors: [],
+    htmlGenerated: 0,
+    htmlUnchanged: 0,
+    htmlErrors: [],
+    previousExports: priorExportSessions.length,
+    transcriptSources: formatRequested ? sessions.length + priorExportSessions.length : 0,
+    projects: projectNames.size,
     collisions: sessions.filter((session) => session.hadCollision).length,
     sessions,
   };
@@ -448,18 +605,20 @@ async function exportSessions(options) {
       await fsp.copyFile(session.source, session.destination);
       result.copied += 1;
     }
+  }
 
-    if (options.pdf) {
-      if (jsonlUnchanged && await isUsablePdf(session.pdfDestination)) {
-        result.pdfsUnchanged += 1;
-      } else {
-        try {
-          await generateChatPdf(session, session.pdfDestination);
-          result.pdfsGenerated += 1;
-        } catch (error) {
-          result.pdfErrors.push({ source: session.source, message: error.message });
-        }
-      }
+  if (formatRequested) {
+    const localSessions = [
+      ...sessions.map((session) => setTranscriptDestinations({
+        ...session,
+        source: session.destination,
+      }, session.destination)),
+      ...priorExportSessions,
+    ];
+    for (let index = 0; index < localSessions.length; index += 1) {
+      const session = localSessions[index];
+      options.onConversionProgress?.({ index: index + 1, total: localSessions.length, session });
+      await generateRequestedTranscripts(session, options, result);
     }
   }
 
@@ -485,21 +644,54 @@ async function main(argv = process.argv.slice(2)) {
   try {
     if (!options.dryRun) {
       options.onProgress = ({ index, total, session }) => {
-        const destination = options.pdf ? session.pdfDestination : session.destination;
-        const label = `${session.project}/${path.basename(destination)}`;
-        process.stdout.write(`\r[${index}/${total}] ${truncateUtf8(label, 90).padEnd(90)}`);
+        const label = `${session.project}/${path.basename(session.destination)}`;
+        process.stdout.write(`\rCopy [${index}/${total}] ${truncateUtf8(label, 85).padEnd(85)}`);
+      };
+      options.onConversionProgress = ({ index, total, session }) => {
+        const label = path.relative(options.output, session.source);
+        process.stdout.write(`\rConvert [${index}/${total}] ${truncateUtf8(label, 82).padEnd(82)}`);
       };
     }
     const result = await exportSessions(options);
     if (!options.dryRun) process.stdout.write("\n");
     const action = options.dryRun ? "Would export" : "Exported";
-    console.log(`${action} ${result.found} session${result.found === 1 ? "" : "s"} across ${result.projects} project${result.projects === 1 ? "" : "s"}.`);
+    console.log(`${action} ${result.found} current session${result.found === 1 ? "" : "s"} across ${result.projects} project${result.projects === 1 ? "" : "s"}.`);
+    if (options.md || options.html || options.pdf) {
+      console.log(`${result.transcriptSources} local JSONL transcript source${result.transcriptSources === 1 ? "" : "s"}; ${result.previousExports} from previous exports.`);
+    }
+    if (!result.sourceAvailable) {
+      console.log("Codex source directory unavailable; using previously exported JSONL files only.");
+    }
     if (!options.dryRun) {
       console.log(`JSONL copied/updated: ${result.copied}; unchanged: ${result.unchanged}.`);
+      if (options.md) {
+        console.log(`Markdown files generated: ${result.markdownGenerated}; unchanged: ${result.markdownUnchanged}.`);
+      } else {
+        console.log("Markdown export: skipped (enable with --md).");
+      }
+      if (options.html) {
+        console.log(`HTML files generated: ${result.htmlGenerated}; unchanged: ${result.htmlUnchanged}.`);
+      } else {
+        console.log("HTML export: skipped (enable with --html).");
+      }
       if (options.pdf) {
         console.log(`PDFs generated: ${result.pdfsGenerated}; unchanged: ${result.pdfsUnchanged}.`);
       } else {
         console.log("PDF export: skipped (enable with --pdf).");
+      }
+      if (options.md && result.markdownErrors.length > 0) {
+        console.error(`Markdown generation failed for ${result.markdownErrors.length} session${result.markdownErrors.length === 1 ? "" : "s"}:`);
+        for (const failure of result.markdownErrors.slice(0, 5)) {
+          console.error(`- ${path.basename(failure.source)}: ${failure.message}`);
+        }
+        process.exitCode = 1;
+      }
+      if (options.html && result.htmlErrors.length > 0) {
+        console.error(`HTML generation failed for ${result.htmlErrors.length} session${result.htmlErrors.length === 1 ? "" : "s"}:`);
+        for (const failure of result.htmlErrors.slice(0, 5)) {
+          console.error(`- ${path.basename(failure.source)}: ${failure.message}`);
+        }
+        process.exitCode = 1;
       }
       if (options.pdf && result.pdfErrors.length > 0) {
         console.error(`PDF generation failed for ${result.pdfErrors.length} session${result.pdfErrors.length === 1 ? "" : "s"}:`);
@@ -509,6 +701,8 @@ async function main(argv = process.argv.slice(2)) {
         process.exitCode = 1;
       }
     } else {
+      console.log(`Markdown export: ${options.md ? "enabled" : "disabled"}.`);
+      console.log(`HTML export: ${options.html ? "enabled" : "disabled"}.`);
       console.log(`PDF export: ${options.pdf ? "enabled" : "disabled"}.`);
     }
     if (result.collisions > 0) {

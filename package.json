@@ -1,22 +1,27 @@
 {
-  "name": "export-codex-chats",
+  "name": "codex-chat-exporter",
   "version": "1.0.0",
-  "description": "Export local Codex sessions as project-organized JSONL files and readable PDFs",
+  "description": "Export local Codex sessions as project-organized JSONL, Markdown, HTML, and PDF transcripts",
   "license": "MIT",
   "author": "Nabeel Khan",
   "type": "commonjs",
   "main": "export-codex-chats.js",
   "bin": {
+    "codex-chat-export": "export-codex-chats.js",
     "export-codex-chats": "export-codex-chats.js"
   },
   "files": [
     "export-codex-chats.js",
+    "chat-html.js",
+    "chat-markdown.js",
     "chat-pdf.js"
   ],
   "keywords": [
     "codex",
     "chat-export",
+    "html",
     "jsonl",
+    "markdown",
     "pdf",
     "transcript"
   ],

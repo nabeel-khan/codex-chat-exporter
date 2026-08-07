@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping improve Export Codex Chats.
+Thanks for helping improve Codex Chat Exporter.
 
 ## Before opening an issue
 

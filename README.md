@@ -1,16 +1,26 @@
-# Export Codex Chats
+# Codex Chat Exporter
 
-Export local Codex session history into project-organized JSONL backups and optional, readable PDF transcripts.
+Export local Codex session history into project-organized, exact JSONL records and optional Markdown, HTML, and PDF transcripts.
 
 This is an independent community project and is not affiliated with or endorsed by OpenAI.
 
+## Why this exists
+
+Codex stores local sessions as detailed JSONL event logs. Those files are authoritative but inconvenient to browse, print, or hand off. Codex Chat Exporter preserves every selected JSONL file exactly while optionally creating readable, per-session Markdown, standalone HTML, and PDF transcripts beside it.
+
+The transcript formats include visible user and Codex messages, recorded reasoning summaries, terminal commands and results, and patch/code-edit activity in chronological order.
+
 ## Features
 
-- Preserves each selected session as an exact JSONL copy.
+- Preserves every selected session as an exact JSONL copy.
 - Groups sessions by working-directory project and indexed session title.
-- Generates optional PDF transcripts with messages, recorded reasoning summaries, terminal activity, and code edits.
+- Generates optional Markdown transcripts with `--md`.
+- Generates optional standalone HTML transcripts with `--html`.
+- Generates optional styled PDF transcripts with `--pdf`.
+- Supports every transcript format in one run with `--md --html --pdf`.
+- Converts JSONL files from previous exports even when their original Codex sessions are gone.
 - Supports project filtering, custom source and destination paths, and dry runs.
-- Avoids rewriting identical JSONL files and valid PDFs.
+- Avoids rewriting identical JSONL files and usable generated transcripts.
 - Never modifies the source Codex session directory.
 
 > [!WARNING]
@@ -32,7 +42,7 @@ After cloning the repository:
 npm ci
 ```
 
-To make the `export-codex-chats` command available from any directory, you can also run:
+To make the preferred `codex-chat-export` command and the compatibility alias `export-codex-chats` available from any directory:
 
 ```bash
 npm link
@@ -46,31 +56,49 @@ Preview an export without writing files:
 npm run export -- --dry-run --output ./exports
 ```
 
-Export all sessions as JSONL:
+Export exact JSONL copies only:
 
 ```bash
 npm run export -- --output ./exports
 ```
 
-Export JSONL and PDF transcripts:
+Export JSONL and Markdown:
+
+```bash
+npm run export -- --md --output ./exports
+```
+
+Export JSONL and standalone HTML:
+
+```bash
+npm run export -- --html --output ./exports
+```
+
+Export JSONL and PDF:
 
 ```bash
 npm run export -- --pdf --output ./exports
 ```
 
+Export all four formats:
+
+```bash
+npm run export -- --md --html --pdf --output ./exports
+```
+
 Export one project (matching is case-insensitive and exact):
 
 ```bash
-npm run export -- --project my-project --pdf --output ./exports
+npm run export -- --project my-project --md --html --pdf --output ./exports
 ```
 
-If you used `npm link`, replace `npm run export -- --` in these examples with `export-codex-chats`.
+If you used `npm link`, replace `npm run export -- --` in these examples with `codex-chat-export`.
 
 ## Command-line options
 
 ```text
 Usage:
-  export-codex-chats [options]
+  codex-chat-export [options]
 
 Options:
   --source <path>  Session directory (default: ~/.codex/sessions)
@@ -78,6 +106,8 @@ Options:
   --state <path>   Codex state database (default: ~/.codex/state_5.sqlite)
   --output <path>  Export directory (default: current working directory)
   --project <name> Export only this project (case-insensitive exact match)
+  --md             Also generate readable Markdown transcripts
+  --html           Also generate standalone HTML transcripts
   --pdf            Also generate readable PDF transcripts
   --dry-run        Show what would happen without writing files
   --help, -h       Show help
@@ -91,7 +121,9 @@ Using an explicit output directory is recommended. The repository ignores `expor
 exports/
   Project-Name/
     Session-Title.jsonl
-    Session-Title.pdf
+    Session-Title.md   # with --md
+    Session-Title.html # with --html
+    Session-Title.pdf  # with --pdf
 ```
 
 Project names come from each session's working directory. Titles are resolved in this order:
@@ -103,14 +135,50 @@ Project names come from each session's working directory. Titles are resolved in
 
 Names are sanitized for cross-platform filesystems. When two sessions resolve to the same project and title, later files receive a short session-ID suffix.
 
-Running the exporter again updates changed JSONL files and leaves identical files alone. Omitting `--pdf` never deletes or modifies existing PDFs. JSONL is the authoritative source record; PDFs are a readable representation and omit encrypted internal reasoning.
+Running the exporter again updates outputs when their source JSONL changes and leaves identical JSONL files and current, usable transcripts alone. Omitting `--md`, `--html`, or `--pdf` never deletes or modifies existing transcript files. JSONL is the authoritative source record; Markdown, HTML, and PDF are readable representations and omit encrypted internal reasoning.
 
-## Privacy and limitations
+## Local conversion pipeline
 
-- Processing happens locally; the exporter itself does not upload session data.
-- PDF output is not a redaction or sanitization boundary.
-- The local Codex storage format may evolve. Please report sessions that the exporter cannot parse, using a synthetic or redacted example.
+All conversions happen from JSONL files in the local `--output` directory:
+
+1. Current Codex session JSONL files are copied or updated in `<output>/<Project>/<Session>.jsonl`.
+2. The exporter discovers JSONL files already present in that same project/title layout, including previous exports.
+3. Requested Markdown, HTML, and PDF transcripts are generated beside those local JSONL files.
+
+This means a previously exported session remains convertible after its Codex project or original session has been deleted. Reuse the directory containing the old export and request the missing format:
+
+```bash
+npm run export -- --html --output /path/to/existing-export
+```
+
+The exporter processes both current sessions and older JSONL files already in that output directory. If the Codex source directory itself no longer exists, conversion still works as long as at least one transcript format is requested and compatible JSONL exports exist under `--output`.
+
+## Active and archived sessions
+
+The default source is `~/.codex/sessions`, which contains active local sessions. The exporter scans one source tree per run and does not automatically combine active and archived sessions.
+
+To export archived sessions separately, provide Codex's archived-session directory explicitly:
+
+```bash
+npm run export -- --source ~/.codex/archived_sessions --md --output ./archived-exports
+```
+
+## Scope and limitations
+
+- Processing happens locally; the exporter itself does not upload session data or send telemetry.
+- Markdown, HTML, and PDF output are not redaction or sanitization boundaries.
+- The exporter does not download cloud-only Codex tasks or ordinary ChatGPT web conversations.
+- It does not import sessions into Codex, recreate Codex UI state, or modify the originals.
+- HTML output is a standalone transcript with no scripts or external assets; the exporter does not create an aggregate HTML index, searchable archive, or machine-readable manifest.
+- It notes image attachments but does not extract them into separate files.
+- The local Codex storage format may evolve. Please report sessions that cannot be parsed using a synthetic or redacted example.
 - A PDF can omit unsupported glyphs or represent them as Unicode code-point labels. The adjacent JSONL remains unchanged.
+
+## Related projects
+
+This project focuses on exact JSONL preservation and individual Markdown, HTML, or PDF transcripts organized by readable project and session titles.
+
+For a self-contained migration archive with combined active/archived discovery, a local HTML metadata index, a manifest, and short archive paths, see [Codex Project Chat Exporter](https://github.com/Ann-Diana/codex-project-chat-exporter).
 
 ## Development
 
