@@ -36,9 +36,11 @@ The exporter works without `sqlite3`; it falls back to Codex's JSONL title index
 
 ## Install from source
 
-After cloning the repository:
+Clone the repository and install its dependency:
 
 ```bash
+git clone https://github.com/nabeel-khan/codex-chat-exporter.git
+cd codex-chat-exporter
 npm ci
 ```
 

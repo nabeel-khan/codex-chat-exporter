@@ -4,6 +4,14 @@
   "description": "Export local Codex sessions as project-organized JSONL, Markdown, HTML, and PDF transcripts",
   "license": "MIT",
   "author": "Nabeel Khan",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nabeel-khan/codex-chat-exporter.git"
+  },
+  "homepage": "https://github.com/nabeel-khan/codex-chat-exporter#readme",
+  "bugs": {
+    "url": "https://github.com/nabeel-khan/codex-chat-exporter/issues"
+  },
   "type": "commonjs",
   "main": "export-codex-chats.js",
   "bin": {
