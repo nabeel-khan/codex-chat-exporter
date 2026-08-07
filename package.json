@@ -1,0 +1,33 @@
+{
+  "name": "export-codex-chats",
+  "version": "1.0.0",
+  "description": "Export local Codex sessions as project-organized JSONL files and readable PDFs",
+  "license": "MIT",
+  "author": "Nabeel Khan",
+  "type": "commonjs",
+  "main": "export-codex-chats.js",
+  "bin": {
+    "export-codex-chats": "export-codex-chats.js"
+  },
+  "files": [
+    "export-codex-chats.js",
+    "chat-pdf.js"
+  ],
+  "keywords": [
+    "codex",
+    "chat-export",
+    "jsonl",
+    "pdf",
+    "transcript"
+  ],
+  "scripts": {
+    "export": "node export-codex-chats.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "pdfmake": "^0.3.11"
+  }
+}

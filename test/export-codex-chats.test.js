@@ -1,0 +1,181 @@
+"use strict";
+
+const assert = require("node:assert/strict");
+const fs = require("node:fs/promises");
+const os = require("node:os");
+const path = require("node:path");
+const test = require("node:test");
+
+const {
+  exportSessions,
+  parseArgs,
+  projectNameFromCwd,
+  sanitizeSegment,
+  titleFromMessage,
+} = require("../export-codex-chats");
+
+async function writeSession(filePath, id, cwd, userMessage) {
+  const lines = [
+    { timestamp: "2026-01-01T00:00:00Z", type: "session_meta", payload: { id, cwd } },
+    { timestamp: "2026-01-01T00:00:01Z", type: "event_msg", payload: { type: "user_message", message: userMessage } },
+  ];
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, `${lines.map(JSON.stringify).join("\n")}\n`);
+}
+
+test("sanitizes project and title path segments", () => {
+  assert.equal(sanitizeSegment('  Fix: login / auth?  ', "fallback"), "Fix - login - auth");
+  assert.equal(sanitizeSegment("CON", "fallback"), "_CON");
+  assert.equal(projectNameFromCwd("/work/acme/"), "acme");
+  assert.equal(projectNameFromCwd("C:\\work\\beta"), "beta");
+  assert.equal(titleFromMessage("# Repair exports\n\nKeep JSONL intact."), "Repair exports Keep JSONL intact.");
+});
+
+test("parses project filtering and PDF opt-in flags", () => {
+  const options = parseArgs(["--project", "Acme", "--pdf", "--output", "."]);
+  assert.equal(options.project, "Acme");
+  assert.equal(options.pdf, true);
+  assert.equal(options.output, process.cwd());
+});
+
+test("copies sessions exactly into project/title folders", async (t) => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codex-export-test-"));
+  t.after(() => fs.rm(tempRoot, { recursive: true, force: true }));
+
+  const source = path.join(tempRoot, "codex", "sessions");
+  const output = path.join(tempRoot, "output");
+  const index = path.join(tempRoot, "codex", "session_index.jsonl");
+  const id1 = "11111111-1111-7111-8111-111111111111";
+  const id2 = "22222222-2222-7222-8222-222222222222";
+  const id3 = "33333333-3333-7333-8333-333333333333";
+  const file1 = path.join(source, "2026", "01", "01", `rollout-a-${id1}.jsonl`);
+  const file2 = path.join(source, "2026", "01", "02", `rollout-b-${id2}.jsonl`);
+  const file3 = path.join(source, "2026", "01", "03", `rollout-c-${id3}.jsonl`);
+
+  await writeSession(file1, id1, "/work/acme", "Ignored fallback one");
+  await writeSession(file2, id2, "/work/acme", "Ignored fallback two");
+  await writeSession(file3, id3, "/work/beta", "Fix / login?");
+  await fs.writeFile(
+    index,
+    [
+      JSON.stringify({ id: id1, thread_name: "Old title", updated_at: "2026-01-01" }),
+      JSON.stringify({ id: id1, thread_name: "Build feature", updated_at: "2026-01-02" }),
+      JSON.stringify({ id: id2, thread_name: "Build feature", updated_at: "2026-01-02" }),
+    ].join("\n"),
+  );
+
+  const result = await exportSessions({ source, output, index, pdf: true, dryRun: false });
+  assert.equal(result.found, 3);
+  assert.equal(result.copied, 3);
+  assert.equal(result.pdfsGenerated, 3);
+  assert.equal(result.pdfErrors.length, 0);
+  assert.equal(result.projects, 2);
+
+  const acmeFiles = (await fs.readdir(path.join(output, "acme"))).sort();
+  assert.deepEqual(acmeFiles, [
+    "Build feature -- 222222222222.jsonl",
+    "Build feature -- 222222222222.pdf",
+    "Build feature.jsonl",
+    "Build feature.pdf",
+  ]);
+  assert.equal(
+    await fs.readFile(path.join(output, "acme", "Build feature.jsonl"), "utf8"),
+    await fs.readFile(file1, "utf8"),
+  );
+  assert.deepEqual((await fs.readdir(path.join(output, "beta"))).sort(), ["Fix - login.jsonl", "Fix - login.pdf"]);
+  assert.equal(
+    (await fs.readFile(path.join(output, "beta", "Fix - login.pdf"))).subarray(0, 5).toString("ascii"),
+    "%PDF-",
+  );
+
+  const rerun = await exportSessions({ source, output, index, pdf: true, dryRun: false });
+  assert.equal(rerun.copied, 0);
+  assert.equal(rerun.unchanged, 3);
+  assert.equal(rerun.pdfsGenerated, 0);
+  assert.equal(rerun.pdfsUnchanged, 3);
+});
+
+test("filters one project and skips PDFs unless requested", async (t) => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codex-export-project-test-"));
+  t.after(() => fs.rm(tempRoot, { recursive: true, force: true }));
+
+  const source = path.join(tempRoot, "sessions");
+  const output = path.join(tempRoot, "output");
+  const index = path.join(tempRoot, "missing-index.jsonl");
+  const acmeId = "55555555-5555-7555-8555-555555555555";
+  const betaId = "66666666-6666-7666-8666-666666666666";
+  await writeSession(path.join(source, `rollout-${acmeId}.jsonl`), acmeId, "/work/acme", "Acme work");
+  await writeSession(path.join(source, `rollout-${betaId}.jsonl`), betaId, "/work/beta", "Beta work");
+
+  const result = await exportSessions({
+    source,
+    output,
+    index,
+    project: "BETA",
+    pdf: false,
+    dryRun: false,
+  });
+
+  assert.equal(result.scanned, 2);
+  assert.equal(result.found, 1);
+  assert.equal(result.projects, 1);
+  assert.equal(result.pdfsGenerated, 0);
+  assert.deepEqual(await fs.readdir(output), ["beta"]);
+  assert.deepEqual(await fs.readdir(path.join(output, "beta")), ["Beta work.jsonl"]);
+
+  const existingPdf = path.join(output, "beta", "Beta work.pdf");
+  await fs.writeFile(existingPdf, "existing PDF placeholder");
+  const rerun = await exportSessions({
+    source,
+    output,
+    index,
+    project: "beta",
+    pdf: false,
+    dryRun: false,
+  });
+  assert.equal(rerun.unchanged, 1);
+  assert.equal(rerun.pdfsGenerated, 0);
+  assert.equal(await fs.readFile(existingPdf, "utf8"), "existing PDF placeholder");
+
+  await assert.rejects(
+    exportSessions({ source, output, index, project: "missing", pdf: false, dryRun: true }),
+    /Available projects: acme, beta/,
+  );
+});
+
+test("dry run creates no output", async (t) => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codex-export-dry-test-"));
+  t.after(() => fs.rm(tempRoot, { recursive: true, force: true }));
+
+  const source = path.join(tempRoot, "sessions");
+  const output = path.join(tempRoot, "output");
+  const id = "44444444-4444-7444-8444-444444444444";
+  await writeSession(path.join(source, `rollout-${id}.jsonl`), id, "/work/gamma", "Do the work");
+
+  const result = await exportSessions({
+    source,
+    output,
+    index: path.join(tempRoot, "missing-index.jsonl"),
+    dryRun: true,
+  });
+
+  assert.equal(result.found, 1);
+  await assert.rejects(fs.stat(output), { code: "ENOENT" });
+});
+
+test("refuses to write into the source tree", async (t) => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codex-export-guard-test-"));
+  t.after(() => fs.rm(tempRoot, { recursive: true, force: true }));
+  const source = path.join(tempRoot, "sessions");
+  await fs.mkdir(source, { recursive: true });
+
+  await assert.rejects(
+    exportSessions({
+      source,
+      output: path.join(source, "exports"),
+      index: path.join(tempRoot, "missing-index.jsonl"),
+      dryRun: false,
+    }),
+    /cannot be the session source/,
+  );
+});
